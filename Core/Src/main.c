@@ -112,7 +112,7 @@ unsigned char mqttReceiveBuf[2048];
 ChannelState_t channelStates[CHANNEL_STATES_NUMBER];
 uint8_t initialActive[CHANNEL_STATES_NUMBER];
 uint8_t initialBrightness[CHANNEL_STATES_NUMBER];
-uint8_t initialColorTemperature[CHANNEL_STATES_NUMBER];
+uint16_t initialColorTemperature[CHANNEL_STATES_NUMBER];
 
 bool mqttConnected = false;
 bool ethernetLink = false;
@@ -139,8 +139,7 @@ AnimationType_t *turnOffAnimation;
 Network mqttNetwork;
 MQTTClient mqttClient;
 
-typedef enum
-{
+typedef enum {
     MF_INIT_START,
     MF_W5500_INITED,
     MF_WAITING_FOR_ETHERNET,
@@ -175,6 +174,31 @@ uint8_t parseUint8(const char *data, size_t dataLength, uint8_t *result, uint8_t
     return 1;
 }
 
+uint8_t
+parseUint16(const char *data, size_t dataLength, uint16_t *result, uint16_t min, uint16_t max) {
+    uint32_t buffer = 0;
+
+    if (dataLength > 5) {
+        return 0;
+    }
+
+
+    for (size_t i = 0; i < dataLength; ++i) {
+        if (data[i] < '0' || data[i] > '9') {
+            return 0;
+        }
+
+        buffer = buffer * 10 + (data[i] - '0');
+    }
+
+    if (buffer < min || buffer > max) {
+        return 0;
+    }
+
+    *result = (uint16_t) buffer;
+    return 1;
+}
+
 void publishChannelStateActive(ChannelState_t *channelState) {
     MQTTMessage pubMessage;
 
@@ -184,7 +208,7 @@ void publishChannelStateActive(ChannelState_t *channelState) {
 
     // active:
     sprintf(topic, "%s/state/%d/active", config.mqttTopic, channelState->id);
-    pubMessage.qos = QOS2;
+    pubMessage.qos = QOS0;
     pubMessage.id = messageId++;
     if (channelState->active) {
         pubMessage.payload = "on";
@@ -215,7 +239,7 @@ void publishChannelStateBrightness(ChannelState_t *channelState) {
 
     sprintf(topic, "%s/state/%d/brightness", config.mqttTopic, channelState->id);
     sprintf(message, "%d", channelState->brightness);
-    pubMessage.qos = QOS2;
+    pubMessage.qos = QOS0;
     pubMessage.id = messageId++;
     pubMessage.payload = message;
     pubMessage.payloadlen = strlen(message);
@@ -235,13 +259,13 @@ void publishChannelStateBrightness(ChannelState_t *channelState) {
 void publishChannelStateColorTemperature(ChannelState_t *channelState) {
     MQTTMessage pubMessage;
 
-    char message[5];
+    char message[8];
     char topic[150];
     uint8_t rc;
 
     sprintf(topic, "%s/state/%d/colorTemperature", config.mqttTopic, channelState->id);
     sprintf(message, "%d", channelState->colorTemperature);
-    pubMessage.qos = QOS2;
+    pubMessage.qos = QOS0;
     pubMessage.id = messageId++;
     pubMessage.payload = message;
     pubMessage.payloadlen = strlen(message);
@@ -272,7 +296,7 @@ uint16_t mapUnsigned(uint16_t x, uint16_t inMin, uint16_t inMax, uint16_t outMin
 }
 
 void setChannelState(ChannelState_t *channelState, uint8_t active, uint8_t brightness,
-                     uint8_t colorTemperature) {
+                     uint16_t colorTemperature) {
 
     bool changed = channelState->active != active
                    || channelState->brightness != brightness
@@ -293,14 +317,14 @@ void setChannelState(ChannelState_t *channelState, uint8_t active, uint8_t brigh
     uint16_t warmStartValue = channelState->warmPwmValue;
     uint16_t coldStartValue = channelState->coldPwmValue;
 
-    uint16_t maxCoefficient = (MAX_COLOR_TEMPERATURE_VALUE + MIN_COLOR_TEMPERATURE_VALUE) / 2;
+    uint16_t maxCoefficient = (MAX_COLOR_TEMPERATURE_VALUE + MIN_COLOR_TEMPERATURE_VALUE) / 2 - MIN_COLOR_TEMPERATURE_VALUE;
 
-    uint16_t warmCoefficient = channelState->colorTemperature > maxCoefficient
+    uint16_t warmCoefficient = channelState->colorTemperature - MIN_COLOR_TEMPERATURE_VALUE > maxCoefficient
                                ? MAX_COLOR_TEMPERATURE_VALUE - channelState->colorTemperature
                                : maxCoefficient;
 
-    uint16_t coldCoefficient = channelState->colorTemperature < maxCoefficient
-                               ? channelState->colorTemperature
+    uint16_t coldCoefficient = channelState->colorTemperature - MIN_COLOR_TEMPERATURE_VALUE < maxCoefficient
+                               ? channelState->colorTemperature - MIN_COLOR_TEMPERATURE_VALUE
                                : maxCoefficient;
 
     uint16_t targetBrightnessPWM = channelState->active ? mapUnsigned(
@@ -313,7 +337,7 @@ void setChannelState(ChannelState_t *channelState, uint8_t active, uint8_t brigh
 
     channelState->targetWarmPwmValue = mapUnsigned(
             warmCoefficient,
-            MIN_COLOR_TEMPERATURE_VALUE,
+            0,
             maxCoefficient,
             MIN_PWM_VALUE,
             targetBrightnessPWM
@@ -321,7 +345,7 @@ void setChannelState(ChannelState_t *channelState, uint8_t active, uint8_t brigh
 
     channelState->targetColdPwmValue = mapUnsigned(
             coldCoefficient,
-            MIN_COLOR_TEMPERATURE_VALUE,
+            0,
             maxCoefficient,
             MIN_PWM_VALUE,
             targetBrightnessPWM
@@ -426,24 +450,54 @@ void stateChangedHandler(MessageData *messageData) {
     if (strcmp("active", valuePtr) == 0) {
         if (message->payloadlen == 2 && (strncasecmp(message->payload, "on", 2) == 0)) {
             if (isStateTopic) {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from STATE topic: %d ON\r\n", channelState->id);
+                }
+#endif
                 initialActive[channelState->id] = 1;
             } else {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from SET topic: %d ON\r\n", channelState->id);
+                }
+#endif
                 setChannelState(channelState, 1, channelState->brightness,
                                 channelState->colorTemperature);
                 publishChannelStateActive(channelState);
             }
         } else if (message->payloadlen == 3 && (strncasecmp(message->payload, "off", 3) == 0)) {
             if (isStateTopic) {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from STATE topic: %d OFF\r\n", channelState->id);
+                }
+#endif
                 initialActive[channelState->id] = 0;
             } else {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from SET topic: %d OFF\r\n", channelState->id);
+                }
+#endif
                 setChannelState(channelState, 0, channelState->brightness,
                                 channelState->colorTemperature);
                 publishChannelStateActive(channelState);
             }
         } else if (message->payloadlen == 6 && (strncasecmp(message->payload, "toggle", 6) == 0)) {
             if (isStateTopic) {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from STATE topic: %d TOGGLE\r\n", channelState->id);
+                }
+#endif
                 initialActive[channelState->id] = !channelState->active;
             } else {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from SET topic: %d TOGGLE\r\n", channelState->id);
+                }
+#endif
                 setChannelState(channelState, !channelState->active, channelState->brightness,
                                 channelState->colorTemperature);
                 publishChannelStateActive(channelState);
@@ -466,16 +520,30 @@ void stateChangedHandler(MessageData *messageData) {
 #endif
         } else {
             if (isStateTopic) {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from STATE topic: %d brightness=%d\r\n", channelState->id,
+                           buffer);
+                }
+#endif
                 initialBrightness[channelState->id] = buffer;
             } else {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from SET topic: %d brightness=%d\r\n", channelState->id,
+                           buffer);
+                }
+#endif
                 setChannelState(channelState, channelState->active, buffer,
                                 channelState->colorTemperature);
                 publishChannelStateBrightness(channelState);
             }
         }
     } else if (strcmp("colorTemperature", valuePtr) == 0) {
-        if (!parseUint8(message->payload, message->payloadlen, &buffer, 0,
-                        255)) {
+        uint16_t bufferColorTemperature = 0;
+        if (!parseUint16(message->payload, message->payloadlen, &bufferColorTemperature,
+                         MIN_COLOR_TEMPERATURE_VALUE,
+                         MAX_COLOR_TEMPERATURE_VALUE)) {
 #ifdef DEBUG_MODE
             if (outputMqttDataToSerial) {
                 printf("Incorrect colorTemperature state value: \"%.*s\"\r\n", message->payloadlen,
@@ -484,10 +552,24 @@ void stateChangedHandler(MessageData *messageData) {
 #endif
         } else {
             if (isStateTopic) {
-                initialColorTemperature[channelState->id] = buffer;
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from STATE topic: %d colorTemperature=%d\r\n",
+                           channelState->id,
+                           bufferColorTemperature);
+                }
+#endif
+                initialColorTemperature[channelState->id] = bufferColorTemperature;
             } else {
+#ifdef DEBUG_MODE
+                if (outputMqttDataToSerial) {
+                    printf("Received from SET topic: %d colorTemperature=%d\r\n",
+                           channelState->id,
+                           bufferColorTemperature);
+                }
+#endif
                 setChannelState(channelState, channelState->active, channelState->brightness,
-                                buffer);
+                                bufferColorTemperature);
                 publishChannelStateColorTemperature(channelState);
             }
         }
@@ -541,14 +623,14 @@ bool mqttInit() {
     willOptions.topicName.cstring = topic;
     willOptions.retained = 1;
     willOptions.message.cstring = "offline";
-    willOptions.qos = QOS2;
+    willOptions.qos = QOS0;
     mqttConnectData.will = willOptions;
     mqttConnectData.MQTTVersion = 4;
     mqttConnectData.clientID.cstring = config.mqttClientId;
     mqttConnectData.username.cstring = config.mqttLogin;
     mqttConnectData.password.cstring = config.mqttPassword;
 
-    mqttConnectData.keepAliveInterval = 5;
+    mqttConnectData.keepAliveInterval = 60;
     mqttConnectData.cleansession = 1;
 
     enum returnCode rc;
@@ -574,7 +656,7 @@ bool mqttInit() {
 
     // subscribe to state topic to get initial data (from retained messages)
 
-    rc = MQTTSubscribe(&mqttClient, mqttTopicStateAll, QOS2, stateChangedHandler);
+    rc = MQTTSubscribe(&mqttClient, mqttTopicStateAll, QOS0, stateChangedHandler);
     if (rc == SUCCESSS) {
 #ifdef DEBUG_MODE
         if (outputMqttDataToSerial) {
@@ -612,7 +694,7 @@ bool mqttInit() {
     }
 
     // subscribe to /set/ topic to receive control operations:
-    rc = MQTTSubscribe(&mqttClient, mqttTopicSetAll, QOS2, stateChangedHandler);
+    rc = MQTTSubscribe(&mqttClient, mqttTopicSetAll, QOS0, stateChangedHandler);
     if (rc == SUCCESSS) {
 #ifdef DEBUG_MODE
         if (outputMqttDataToSerial) {
@@ -633,7 +715,7 @@ bool mqttInit() {
 
     sprintf(topic, "%s/status", config.mqttTopic);
 
-    pubMessage.qos = QOS2;
+    pubMessage.qos = QOS0;
     pubMessage.id = messageId++;
     pubMessage.payload = message;
     pubMessage.payloadlen = sizeof message - 1;
@@ -798,6 +880,14 @@ void initChannelStates() {
         channelState->warmPwmValue = 0;
         channelState->targetColdPwmValue = 0;
         channelState->targetWarmPwmValue = 0;
+
+        channelStates[i].active = 0;
+        channelStates[i].brightness = (MAX_BRIGHTNESS_VALUE + MIN_BRIGHTNESS_VALUE) / 2;
+        channelStates[i].colorTemperature =
+                (MAX_COLOR_TEMPERATURE_VALUE + MIN_COLOR_TEMPERATURE_VALUE) / 2;
+
+        HAL_TIM_PWM_Start(channelStates[i].warmTimerHandle, channelStates[i].warmTimerChannel);
+        HAL_TIM_PWM_Start(channelStates[i].coldTimerHandle, channelStates[i].coldTimerChannel);
     }
 }
 
@@ -878,16 +968,6 @@ int main(void) {
     HAL_TIM_Base_Start_IT(&htim6);
 
     initChannelStates();
-
-    for (uint8_t i = 0; i < 5; ++i) {
-        channelStates[i].active = 0;
-        channelStates[i].brightness = 50;
-        channelStates[i].colorTemperature = 50;
-
-        HAL_TIM_PWM_Start(channelStates[i].warmTimerHandle, channelStates[i].warmTimerChannel);
-        HAL_TIM_PWM_Start(channelStates[i].coldTimerHandle, channelStates[i].coldTimerChannel);
-    }
-
     /* USER CODE END 2 */
 
     /* Infinite loop */

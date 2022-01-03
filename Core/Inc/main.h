@@ -42,8 +42,8 @@ extern "C" {
 #define MIN_PWM_VALUE 0
 #define MAX_PWM_VALUE 499
 
-#define MIN_COLOR_TEMPERATURE_VALUE 0
-#define MAX_COLOR_TEMPERATURE_VALUE 255
+#define MIN_COLOR_TEMPERATURE_VALUE 153U
+#define MAX_COLOR_TEMPERATURE_VALUE 500U
 
 #define MIN_BRIGHTNESS_VALUE 0
 #define MAX_BRIGHTNESS_VALUE 255
@@ -52,7 +52,7 @@ typedef struct {
     uint8_t id;
     uint8_t active;
     uint8_t brightness;
-    uint8_t colorTemperature;
+    uint16_t colorTemperature;
 
     uint16_t warmPwmValue;
     uint16_t coldPwmValue;
